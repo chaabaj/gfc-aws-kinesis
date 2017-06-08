@@ -4,7 +4,7 @@ import java.util.UUID
 
 import com.amazonaws.auth.{AWSCredentialsProvider, AWSCredentialsProviderChain, DefaultAWSCredentialsProviderChain}
 import com.amazonaws.services.kinesis.clientlibrary.lib.worker.KinesisClientLibConfiguration
-
+import scala.concurrent.duration._
 
 /** Configures KCL
   *
@@ -32,6 +32,7 @@ object KCLConfiguration {
     */
   def apply( applicationName: String
            , streamName: String
+           , pollingInterval: FiniteDuration = 1.seconds,
            , kinesisCredentialsProvider: AWSCredentialsProvider = new DefaultAWSCredentialsProviderChain()
            , dynamoCredentialsProvider: AWSCredentialsProvider = new DefaultAWSCredentialsProviderChain()
            , cloudWatchCredentialsProvider: AWSCredentialsProvider = new DefaultAWSCredentialsProviderChain()
@@ -48,5 +49,6 @@ object KCLConfiguration {
     , cloudWatchCredentialsProvider
     , s"${HostName}:${UUID.randomUUID()}"
     ).withRegionName(regionName.orNull)
+     .withIdleTimeBetweenReadsInMillis(pollingInterval.toMillis)
   }
 }
