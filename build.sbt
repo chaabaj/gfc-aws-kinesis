@@ -1,13 +1,13 @@
 val commonSettings = Seq(
-  scalaVersion := "2.11.11",
-  crossScalaVersions := Seq(scalaVersion.value, "2.12.2"),
+  scalaVersion := "2.12.2",
+  crossScalaVersions := Seq(scalaVersion.value, "2.11.1"),
   organization := "com.gilt",
 
   releaseCrossBuild := true,
 
-  scalacOptions += "-target:jvm-1.7",
+  scalacOptions += "-target:jvm-1.8",
 
-  javacOptions ++= Seq("-source", "1.7", "-target", "1.7"),
+  javacOptions ++= Seq("-source", "1.8", "-target", "1.8"),
 
   releasePublishArtifactsAction := PgpKeys.publishSigned.value,
 
