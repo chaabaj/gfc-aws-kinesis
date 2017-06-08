@@ -4,12 +4,14 @@ import com.amazonaws.auth.{AWSCredentialsProvider, DefaultAWSCredentialsProvider
 import com.amazonaws.services.kinesis.clientlibrary.lib.worker.InitialPositionInStream
 import com.amazonaws.services.kinesis.metrics.impl.NullMetricsFactory
 import com.amazonaws.services.kinesis.metrics.interfaces.IMetricsFactory
+import scala.concurrent.duration._
 
 import scala.concurrent.duration._
 
 case class KinesisStreamConsumerConfig[T](
   streamName: String,
   applicationName: String,
+  pollingInterval: FiniteDuration = 1.seconds,
   kinesisCredentialsProvider: AWSCredentialsProvider = new DefaultAWSCredentialsProviderChain(),
   dynamoCredentialsProvider: AWSCredentialsProvider = new DefaultAWSCredentialsProviderChain(),
   cloudWatchCredentialsProvider: AWSCredentialsProvider = new DefaultAWSCredentialsProviderChain(),

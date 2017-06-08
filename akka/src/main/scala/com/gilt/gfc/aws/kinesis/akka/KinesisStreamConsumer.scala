@@ -11,6 +11,7 @@ class KinesisStreamConsumer[T](
   private val kclConfig = KCLConfiguration(
     streamConfig.applicationName,
     streamConfig.streamName,
+    streamConfig.pollingInterval,
     streamConfig.kinesisCredentialsProvider,
     streamConfig.dynamoCredentialsProvider,
     streamConfig.cloudWatchCredentialsProvider,

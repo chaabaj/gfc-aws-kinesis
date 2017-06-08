@@ -32,7 +32,7 @@ object KCLConfiguration {
     */
   def apply( applicationName: String
            , streamName: String
-           , pollingInterval: FiniteDuration = 1.seconds,
+           , pollingInterval: FiniteDuration
            , kinesisCredentialsProvider: AWSCredentialsProvider = new DefaultAWSCredentialsProviderChain()
            , dynamoCredentialsProvider: AWSCredentialsProvider = new DefaultAWSCredentialsProviderChain()
            , cloudWatchCredentialsProvider: AWSCredentialsProvider = new DefaultAWSCredentialsProviderChain()
