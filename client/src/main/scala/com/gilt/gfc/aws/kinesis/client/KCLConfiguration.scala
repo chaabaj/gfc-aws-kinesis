@@ -1,10 +1,10 @@
 package com.gilt.gfc.aws.kinesis.client
 
 import java.util.UUID
-
-import com.amazonaws.auth.{AWSCredentialsProvider, AWSCredentialsProviderChain, DefaultAWSCredentialsProviderChain}
-import com.amazonaws.services.kinesis.clientlibrary.lib.worker.KinesisClientLibConfiguration
 import scala.concurrent.duration._
+
+import com.amazonaws.auth.{AWSCredentialsProvider, DefaultAWSCredentialsProviderChain}
+import com.amazonaws.services.kinesis.clientlibrary.lib.worker.{InitialPositionInStream, KinesisClientLibConfiguration}
 
 /** Configures KCL
   *
@@ -13,6 +13,7 @@ import scala.concurrent.duration._
   *
   * https://github.com/awslabs/amazon-kinesis-client
   */
+case class KinesisClientEndpoints(dynamoDBEndpoint: String, kinesisEndpoint: String)
 object KCLConfiguration {
 
   val HostName = {
@@ -30,25 +31,38 @@ object KCLConfiguration {
     *
     * @param streamName kinesis stream name
     */
-  def apply( applicationName: String
-           , streamName: String
-           , pollingInterval: FiniteDuration
-           , kinesisCredentialsProvider: AWSCredentialsProvider = new DefaultAWSCredentialsProviderChain()
-           , dynamoCredentialsProvider: AWSCredentialsProvider = new DefaultAWSCredentialsProviderChain()
-           , cloudWatchCredentialsProvider: AWSCredentialsProvider = new DefaultAWSCredentialsProviderChain()
-           , regionName: Option[String] = None
-           ): KinesisClientLibConfiguration = {
+  def apply(applicationName: String
+            , streamName: String
+            , kinesisCredentialsProvider: AWSCredentialsProvider = new DefaultAWSCredentialsProviderChain()
+            , dynamoCredentialsProvider: AWSCredentialsProvider = new DefaultAWSCredentialsProviderChain()
+            , cloudWatchCredentialsProvider: AWSCredentialsProvider = new DefaultAWSCredentialsProviderChain()
+            , regionName: Option[String] = None
+            , initialPositionInStream: InitialPositionInStream = InitialPositionInStream.LATEST
+            , endpointConfiguration: Option[KinesisClientEndpoints] = None
+            , failoverTimeoutMillis: Long = KinesisClientLibConfiguration.DEFAULT_FAILOVER_TIME_MILLIS
+            , maxRecordsPerBatch: Int = KinesisClientLibConfiguration.DEFAULT_MAX_RECORDS
+            , idleTimeBetweenReads: FiniteDuration = KinesisClientLibConfiguration.DEFAULT_IDLETIME_BETWEEN_READS_MILLIS.millis): KinesisClientLibConfiguration = {
 
-    new KinesisClientLibConfiguration(
-      // We want same app to process multiple versions of stream,
-      // this name-spaces them to avoid name clash in dynamodb.
-      s"${applicationName}.${streamName}"
-    , streamName
-    , kinesisCredentialsProvider
-    , dynamoCredentialsProvider
-    , cloudWatchCredentialsProvider
-    , s"${HostName}:${UUID.randomUUID()}"
+    val dynamoTableName = (s"${applicationName}.${streamName}")
+      .replaceAll("[^a-zA-Z0-9_.-]", "-")
+
+    val conf = new KinesisClientLibConfiguration(
+      dynamoTableName,
+      streamName,
+      kinesisCredentialsProvider,
+      dynamoCredentialsProvider,
+      cloudWatchCredentialsProvider,
+      s"${HostName}:${UUID.randomUUID()}"
     ).withRegionName(regionName.orNull)
-     .withIdleTimeBetweenReadsInMillis(pollingInterval.toMillis)
+     .withInitialPositionInStream(initialPositionInStream)
+     .withFailoverTimeMillis(failoverTimeoutMillis)
+     .withMaxRecords(maxRecordsPerBatch)
+     .withIdleTimeBetweenReadsInMillis(idleTimeBetweenReads.toMillis)
+
+    endpointConfiguration.fold(conf)( endpoints =>
+      conf.withDynamoDBEndpoint(endpoints.dynamoDBEndpoint)
+          .withKinesisEndpoint(endpoints.kinesisEndpoint)
+    )
+
   }
 }
