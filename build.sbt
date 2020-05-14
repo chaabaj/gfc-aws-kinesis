@@ -1,13 +1,13 @@
 val commonSettings = Seq(
-  scalaVersion := "2.11.11",
-  crossScalaVersions := Seq(scalaVersion.value, "2.12.2"),
+  scalaVersion := "2.12.8",
+  crossScalaVersions := Seq(scalaVersion.value, "2.11.12"),
   organization := "com.gilt",
 
   releaseCrossBuild := true,
 
-  scalacOptions += "-target:jvm-1.7",
+  scalacOptions += "-target:jvm-1.8",
 
-  javacOptions ++= Seq("-source", "1.7", "-target", "1.7"),
+  javacOptions ++= Seq("-source", "1.8", "-target", "1.8"),
 
   releasePublishArtifactsAction := PgpKeys.publishSigned.value,
 
@@ -60,12 +60,13 @@ lazy val client = (project in file("client"))
   .settings(
   name := "gfc-aws-kinesis",
   libraryDependencies ++= Seq(
-    "com.gilt"      %% "gfc-util"              % "0.1.7",
-    "com.gilt"      %% "gfc-logging"           % "0.0.7",
-    "com.gilt"      %% "gfc-concurrent"        % "0.3.5",
-    "com.amazonaws" %  "aws-java-sdk-kinesis"  % "1.11.18",
-    "com.amazonaws" %  "amazon-kinesis-client" % "1.7.3",
-    "org.specs2"    %% "specs2-scalacheck"     % "3.8.6" % Test
+    "com.gilt"      %% "gfc-util"              % "0.2.2",
+    "com.gilt"      %% "gfc-logging"           % "0.0.8",
+    "com.gilt"      %% "gfc-concurrent"        % "0.3.8",
+    "com.amazonaws" %  "aws-java-sdk-kinesis"  % "1.11.455",
+    "com.amazonaws" %  "amazon-kinesis-client" % "1.9.3",
+    "com.amazonaws" % "dynamodb-streams-kinesis-adapter" % "1.4.0",
+    "org.specs2"    %% "specs2-scalacheck"     % "4.0.3" % Test
   )
 )
 
@@ -73,7 +74,7 @@ lazy val akka = (project in file("akka"))
   .settings(commonSettings:_*)
   .settings(
     name := "gfc-aws-kinesis-akka",
-    libraryDependencies += "com.typesafe.akka" %% "akka-stream" % "2.4.12")
+    libraryDependencies += "com.typesafe.akka" %% "akka-stream" % "2.5.18")
   .dependsOn(client)
 
 lazy val root = (project in file("."))

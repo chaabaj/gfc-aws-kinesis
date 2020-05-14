@@ -1,14 +1,13 @@
 package com.gilt.gfc.aws.kinesis.client
 
 import com.amazonaws.services.kinesis.clientlibrary.interfaces.IRecordProcessorCheckpointer
-import com.amazonaws.services.kinesis.clientlibrary.interfaces.IRecordProcessorFactory
-import com.amazonaws.services.kinesis.clientlibrary.lib.worker.{KinesisClientLibConfiguration, Worker}
-import com.amazonaws.services.kinesis.clientlibrary.lib.worker.ShutdownReason
+import com.amazonaws.services.kinesis.clientlibrary.lib.worker.{InitialPositionInStream, KinesisClientLibConfiguration, ShutdownReason, Worker}
 import com.amazonaws.services.kinesis.metrics.interfaces.IMetricsFactory
 import com.amazonaws.services.kinesis.model.Record
 import com.gilt.gfc.logging.Loggable
-
 import java.util.concurrent.TimeUnit
+
+import com.amazonaws.services.dynamodbv2.streamsadapter.AmazonDynamoDBStreamsAdapterClient
 
 import scala.concurrent.duration._
 import scala.concurrent.{Await, ExecutionContext, Future}
@@ -30,7 +29,8 @@ import scala.util.{Failure, Success, Try}
  */
 case class KCLWorkerRunner (
   config: KinesisClientLibConfiguration
-, checkpointInterval: FiniteDuration = 5 minutes
+, dynamoDBKinesisAdapter: Option[AmazonDynamoDBStreamsAdapterClient] = None
+, checkpointInterval: Duration = 5 minutes
 , numRetries: Int = 3
 , initialize: (String) => Unit = (_) => ()
 , shutdown: (String, IRecordProcessorCheckpointer, ShutdownReason) => Unit = (_,_,_) => ()
@@ -42,7 +42,7 @@ case class KCLWorkerRunner (
   private[this] var workers = List[Worker]()
 
   /** Override default checkpointInterval. */
-  def withCheckpointInterval( cpi: FiniteDuration
+  def withCheckpointInterval( cpi: Duration
                             ): KCLWorkerRunner = {
 
     this.copy(checkpointInterval = cpi)
@@ -79,7 +79,7 @@ case class KCLWorkerRunner (
   /**
    * Request graceful shutdown of all Kinesis workers.
    *
-   * @param callbackTimeout   how long to wait for shutdown to complete
+   * @param timeout   how long to wait for shutdown to complete
    */
   def shutdown(timeout: Duration = 1.minute): Unit = {
     val javaFutures = synchronized {
@@ -121,12 +121,18 @@ case class KCLWorkerRunner (
         processRecords(shardId, as.map(_.get), checkpointer)
 
         // log records we could not parse, pointless to retry them
-        errs.map(_.failed.get).foreach { e => error(e.getMessage, e) }
+        errs.map(_.failed.get).foreach { e => error("Error processing a single batched record", e) }
       }
 
-      val worker = metricsFactory.fold(
-        new Worker(recordProcessorFactory, config))(
-        mf => new Worker(recordProcessorFactory, config, mf))
+      val workerBuilder: Worker.Builder = new Worker.Builder()
+            .recordProcessorFactory(recordProcessorFactory)
+              .config(config)
+      dynamoDBKinesisAdapter.foreach(
+        adapter => workerBuilder.kinesisClient(adapter)
+      )
+      metricsFactory.foreach(mf => workerBuilder.metricsFactory(mf))
+
+      val worker = workerBuilder.build()
 
       synchronized {
         workers ::= worker
@@ -135,7 +141,7 @@ case class KCLWorkerRunner (
 
     } catch {
       case NonFatal(e) =>
-        error(e.getMessage, e)
+        error("Error processing an entire record batch", e)
     }
   }
 
@@ -225,7 +231,8 @@ case class KCLWorkerRunner (
       Success(evReader(r))
     } catch {
       case NonFatal(e) =>
-        Failure(KCLWorkerRunnerRecordConversionException(r, ByteBufferUtil.toHexString(copyOfTheData), e))
+        debug(s"Record conversion failure - record [$r], raw data [${ByteBufferUtil.toHexString(copyOfTheData)}]", e)
+        Failure(KCLWorkerRunnerRecordConversionException(r, e))
     }
   }
 }
@@ -233,13 +240,12 @@ case class KCLWorkerRunner (
 
 case class KCLWorkerRunnerRecordConversionException(
   record: Record
-, hexData: String
 , cause: Throwable
-) extends RuntimeException(s"Failed to convert ${record} to required type: ${cause.getMessage} :: DATA: ${hexData}", cause)
+) extends RuntimeException(s"Failed to convert ${record} to required type", cause)
 
 
 case class KCLWorkerRunnerRecordProcessingException(
   record: Record
 , shardId: String
 , cause: Throwable
-) extends RuntimeException(s"Failed to process ${record} from shard ${shardId}: ${cause.getMessage}", cause)
+) extends RuntimeException(s"Failed to process ${record} from shard ${shardId}", cause)

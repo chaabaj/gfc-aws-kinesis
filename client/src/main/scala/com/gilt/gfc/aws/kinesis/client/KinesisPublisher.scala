@@ -5,9 +5,10 @@ import java.util.concurrent._
 
 import com.amazonaws.ClientConfigurationFactory
 import com.amazonaws.auth.{AWSCredentialsProvider, DefaultAWSCredentialsProviderChain}
+import com.amazonaws.client.builder.AwsClientBuilder.EndpointConfiguration
 import com.amazonaws.regions.Region
 import com.amazonaws.retry.PredefinedRetryPolicies
-import com.amazonaws.services.kinesis.AmazonKinesisClient
+import com.amazonaws.services.kinesis.AmazonKinesisClientBuilder
 import com.amazonaws.services.kinesis.model.{PutRecordsRequest, PutRecordsRequestEntry}
 import com.gilt.gfc.concurrent.ThreadFactoryBuilder
 import com.gilt.gfc.logging.Loggable
@@ -15,35 +16,10 @@ import com.gilt.gfc.logging.Loggable
 import scala.annotation.tailrec
 import scala.collection.JavaConverters._
 import scala.concurrent.duration.{FiniteDuration, _}
-import scala.concurrent.{Future, ExecutionContext, ExecutionContextExecutor}
+import scala.concurrent.{ExecutionContext, Future, blocking}
 import scala.language.postfixOps
 import scala.util.Random
 import scala.util.control.NonFatal
-
-
-/** Stats about attempted call to publishBatch(), mostly to allow metrics library hooks. */
-case class KinesisPublisherBatchResult(
-  successRecordCount: Int = 0 // number of successfully published records
-, failureRecordCount: Int = 0 // number of records we've failed to publish even after all retries
-, serviceErrorCount: Int = 0  // number of failed attempts to publish a record
-, attemptCount: Int = 0       // number of attempts to publish
-) {
-  require(successRecordCount >= 0, s"successRecordCount must be >= 0")
-  require(failureRecordCount >= 0, s"failureRecordCount must be >= 0")
-  require(serviceErrorCount  >= 0, s"serviceErrorCount must be >= 0")
-  require(attemptCount       >= 0, s"attemptCount must be >= 0")
-
-  def + ( other: KinesisPublisherBatchResult
-        ): KinesisPublisherBatchResult = {
-
-    KinesisPublisherBatchResult(
-      successRecordCount = this.successRecordCount + other.successRecordCount
-    , failureRecordCount = this.failureRecordCount + other.failureRecordCount
-    , serviceErrorCount  = this.serviceErrorCount  + other.serviceErrorCount
-    , attemptCount       = this.attemptCount       + other.attemptCount
-    )
-  }
-}
 
 
 /** Publishes a mini-batch of records to Kinesis. Implements the necessary retry logic. */
@@ -74,21 +50,90 @@ object KinesisPublisher {
     * @param maxErrorRetryCount       how many times to retry in the case of publishing errors
     * @param threadPoolSize           we make synchronous requests to kinesis, this determines parallelism
     * @param awsCredentialsProvider   override default credentials provider
+    * @param awsRegion                override default region
+    * @param awsEndpointConfig        override default endpoint
     */
   def apply( maxErrorRetryCount: Int = 10
            , threadPoolSize: Int = 8
            , awsCredentialsProvider: AWSCredentialsProvider = new DefaultAWSCredentialsProviderChain()
            , awsRegion: Option[Region] = None
-           ): KinesisPublisher = new KinesisPublisherImpl(maxErrorRetryCount, threadPoolSize, awsCredentialsProvider, awsRegion)
+           , awsEndpointConfig: Option[EndpointConfiguration] = None
+           ): KinesisPublisher = {
+
+    new KinesisPublisherImpl(
+      maxErrorRetryCount
+    , newDefaultExecutor(threadPoolSize)
+    , awsCredentialsProvider
+    , awsRegion
+    , awsEndpointConfig
+    )
+  }
+
+
+  /** Constructs KinesisPublisher with a custom executor.
+    *
+    * @param maxErrorRetryCount       how many times to retry in the case of publishing errors
+    * @param executor                 custom executor service
+    * @param awsCredentialsProvider   override default credentials provider
+    * @param awsRegion                override default region
+    */
+  def apply( maxErrorRetryCount: Int
+           , executor: ExecutorService
+           , awsCredentialsProvider: AWSCredentialsProvider
+           , awsRegion: Option[Region]
+           ): KinesisPublisher = {
+    apply(maxErrorRetryCount, executor, awsCredentialsProvider, awsRegion, None)
+  }
+
+  /** Constructs KinesisPublisher with a custom executor.
+    *
+    * @param maxErrorRetryCount       how many times to retry in the case of publishing errors
+    * @param executor                 custom executor service
+    * @param awsCredentialsProvider   override default credentials provider
+    * @param awsRegion                override default region
+    * @param awsEndpointConfig        override default endpoint
+    */
+  def apply( maxErrorRetryCount: Int
+           , executor: ExecutorService
+           , awsCredentialsProvider: AWSCredentialsProvider
+           , awsRegion: Option[Region]
+           , awsEndpointConfig: Option[EndpointConfiguration]
+           ): KinesisPublisher = {
+
+    new KinesisPublisherImpl(
+      maxErrorRetryCount
+    , executor
+    , awsCredentialsProvider
+    , awsRegion
+    , awsEndpointConfig
+    )
+  }
+
+
+  /** Like Executors.newCachedThreadPool() but with both, thread factory and max size provided. */
+  private[this]
+  def newDefaultExecutor( threadPoolSize: Int
+                        ): ExecutorService = {
+
+    new ThreadPoolExecutor(
+      0
+    , threadPoolSize
+    , 30L
+    , TimeUnit.SECONDS
+    , new SynchronousQueue[Runnable]()
+    , ThreadFactoryBuilder(getClass.getSimpleName, getClass.getSimpleName).build()
+    )
+  }
 }
 
 
 private[client]
 class KinesisPublisherImpl (
   maxErrorRetryCount: Int
-, threadPoolSize: Int
+, executor: ExecutorService
 , awsCredentialsProvider: AWSCredentialsProvider
 , awsRegion: Option[Region]
+, awsEndpointConfig: Option[EndpointConfiguration]
 ) extends KinesisPublisher
      with Loggable {
 
@@ -140,9 +185,12 @@ class KinesisPublisherImpl (
                 ): KinesisPublisherBatchResult = {
     debug(s"putRecords: streamName=${streamName}, recordEntries=${recordEntries.size}, batchResult=${batchResult}")
 
-    if (batchResult.attemptCount > maxErrorRetryCount) {
-      error(s"Failed to put ${recordEntries.size} records to ${streamName} after ${maxErrorRetryCount} unsuccessful retries!")
+    if (recordEntries.isEmpty) {
+      warn(s"Skipping empty record batch ...")
+      batchResult
 
+    } else if (batchResult.attemptCount > maxErrorRetryCount) {
+      error(s"Failed to put ${recordEntries.size} records to ${streamName} after ${maxErrorRetryCount} unsuccessful retries!")
       batchResult + KinesisPublisherBatchResult(failureRecordCount = recordEntries.size)
 
     } else {
@@ -153,74 +201,72 @@ class KinesisPublisherImpl (
         Thread.sleep(sleepTimeMillis)
       }
 
-      val leftover = tryPutRecords(streamName, recordEntries)
+      val callResults = tryPutRecords(streamName, recordEntries)
+      val thisResult = KinesisPublisherBatchResult(callResults)
+      val cumulativeResult = batchResult + thisResult
+      val logPrefix = s"${streamName} attempt ${cumulativeResult.attemptCount}, req ID ${callResults.requestId}:"
 
-      val thisResult = batchResult + KinesisPublisherBatchResult(
-        successRecordCount = recordEntries.size - leftover.size
-      , serviceErrorCount = leftover.size
-      , attemptCount = 1
-      )
-
-      debug(s"Attempt ${thisResult.attemptCount}: published ${recordEntries.size} records to ${streamName} with ${leftover.size} left over due to errors")
-
-      if (leftover.isEmpty) {
-        thisResult
+      if (callResults.failures.isEmpty) {
+        debug(s"${logPrefix} successfully published ${recordEntries.size} records")
       } else {
-        putRecords(streamName, leftover, thisResult)
+        warn(s"${logPrefix} published ${recordEntries.size} records with ${callResults.failures.size} left over due to errors: by errorCode: ${thisResult.errorCodes}, response headers: ${callResults.responseHeaders}")
+      }
+
+      callResults.hardFailures.foreach { case (e,r) =>
+        error(s"${logPrefix} skipping ${e}, shard ID ${r.map(_.getShardId)} due to unrecoverable error ${r.map(_.getErrorCode)} ...")
+      }
+
+      if (callResults.softFailures.isEmpty) {
+        cumulativeResult
+      } else {
+        putRecords(streamName, callResults.softFailures.map(_._1), cumulativeResult)
       }
     }
   }
 
 
   /** Tries to put a batch of records.
-    * Returns a subset of records that weren't published.
-    * Most common reason for that is the 500 service error from kinesis which (in small numbers) is said to be expected.
     *
     * @param streamName      kinesis stream name
     * @param recordEntries   records to be published
-    * @return                records that we failed to publish
+    * @return                request entries paired up with kinesis responses, if any
     */
   private[this]
   def tryPutRecords( streamName: String
                    , recordEntries: Seq[PutRecordsRequestEntry] // need an ordered collection here, matching results by index
-                   ): Seq[PutRecordsRequestEntry]  = {
-
-    // API is very imperative, see "Example PutRecords failure handler"
-    // http://docs.aws.amazon.com/streams/latest/dev/developing-producers-with-sdk.html#kinesis-using-sdk-java-putrecords
-    // one is supposed to match arrays by index, at least they seem to be always of the same size
-
+                   ): KinesisPublisherPutRecordsCallResults = {
     try {
-      val res = kinesisClient.putRecords(
-        new PutRecordsRequest().
-          withStreamName(streamName).
-          withRecords(recordEntries.asJavaCollection)
-      )
-
-      if (res.getFailedRecordCount > 0) {
-        val failedRecords = for (
-          (res,req) <- res.getRecords.asScala.zip(recordEntries) if res.getErrorCode != null
-        ) yield {
-          req
-        }
-
-        failedRecords
-
-      } else {
-
-        Seq.empty
+      val callRes = blocking {
+        kinesisClient.putRecords(
+          new PutRecordsRequest().
+            withStreamName(streamName).
+            withRecords(recordEntries.asJavaCollection)
+        )
       }
 
+      KinesisPublisherPutRecordsCallResults(
+        allResults = for (
+          (res,req) <- callRes.getRecords.asScala.zip(recordEntries)
+        ) yield {
+          (req, Some(res))
+        }
+      , requestId = Option(callRes.getSdkResponseMetadata).flatMap(m => Option(m.getRequestId))
+      , responseHeaders = (for {
+          sdkMeta <- Option(callRes.getSdkHttpMetadata)
+          responseHeaders <- Option(sdkMeta.getHttpHeaders)
+        } yield responseHeaders.asScala.toMap).getOrElse(Map.empty)
+      )
     } catch {
       case NonFatal(e) =>
         warn(s"Kinesis call to publish batch to ${streamName} failed: ${e.getMessage}", e)
-        recordEntries
+        KinesisPublisherPutRecordsCallResults(recordEntries.map((_, None)))
     }
   }
 
 
   /** N.B. AWS provides async client as well but it's just a simple wrapper around
     * sync client, with java-based Futures and other async primitives.
-    * No reason to use it, really.
+    * No reason to use it, really, we can get Scala futures from Scala's execution context.
     */
   private[this]
   val kinesisClient = {
@@ -230,21 +276,15 @@ class KinesisPublisherImpl (
     val rp = PredefinedRetryPolicies.getDefaultRetryPolicyWithCustomMaxRetries(maxErrorRetryCount)
     val conf = cf.getConfig.withRetryPolicy(rp)
 
-    val client = new AmazonKinesisClient(awsCredentialsProvider, conf)
-    awsRegion.foreach(region => client.setRegion(region))
-    client
+    val builder = AmazonKinesisClientBuilder.standard()
+      .withClientConfiguration(conf)
+      .withCredentials(awsCredentialsProvider)
+
+    awsRegion.foreach(region => builder.setRegion(region.getName))
+    awsEndpointConfig.foreach(endpoint => builder.setEndpointConfiguration(endpoint))
+
+    builder.build()
   }
-
-
-  private[this]
-  val executor = new java.util.concurrent.ThreadPoolExecutor(
-    0
-  , threadPoolSize
-  , 30L
-  , TimeUnit.SECONDS
-  , new SynchronousQueue[Runnable]()
-  , ThreadFactoryBuilder(getClass.getSimpleName, getClass.getSimpleName).build()
-  )
 
 
   implicit
